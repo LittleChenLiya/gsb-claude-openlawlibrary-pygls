@@ -270,8 +270,18 @@ class JsonRPCProtocol:
             return
 
         try:
-            value = future.result() if future is not None else None
-            handler, args, kwargs = gen.send(value)
+            if (
+                future is not None
+                and not future.cancelled()
+                and (error := future.exception()) is not None
+            ):
+                # The previously executed handler failed - throw the error into
+                # the generator so that it has the opportunity to clean up any
+                # state it may have created before the error is propagated.
+                handler, args, kwargs = gen.throw(error)
+            else:
+                value = future.result() if future is not None else None
+                handler, args, kwargs = gen.send(value)
 
             self._execute_handler(
                 str(uuid.uuid4()),

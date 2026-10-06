@@ -70,6 +70,9 @@ class LanguageServerProtocol(JsonRPCProtocol):
         super().__init__(server, converter)
 
         self._workspace: Optional[Workspace] = None
+        self._position_encoding: Optional[
+            typing.Union[types.PositionEncodingKind, str]
+        ] = None
         self.trace = types.TraceValue.Off
 
         from pygls.progress import Progress
@@ -86,7 +89,7 @@ class LanguageServerProtocol(JsonRPCProtocol):
     def _register_builtin_features(self):
         """Registers generic LSP features from this class."""
         for name in dir(self):
-            if name in {"workspace"}:
+            if name in {"workspace", "position_encoding"}:
                 continue
 
             attr = getattr(self, name)
@@ -101,6 +104,22 @@ class LanguageServerProtocol(JsonRPCProtocol):
             )
 
         return self._workspace
+
+    @property
+    def position_encoding(self) -> typing.Union[types.PositionEncodingKind, str]:
+        """The position encoding negotiated with the client for this session.
+
+        This is a snapshot taken during ``initialize`` and is independent of
+        the client's capabilities object - modifying that object after
+        initialization does not affect the session.
+        """
+        if self._position_encoding is None:
+            raise RuntimeError(
+                "The position encoding is not available - "
+                "has the server been initialized?"
+            )
+
+        return self._position_encoding
 
     @lru_cache()
     def get_message_type(self, method: str) -> Type[Any] | None:
@@ -150,6 +169,11 @@ class LanguageServerProtocol(JsonRPCProtocol):
         position_encoding = ServerCapabilitiesBuilder.choose_position_encoding(
             self.client_capabilities
         )
+        # Snapshot the negotiated encoding for the remainder of the session.
+        # The snapshot is a single value, stored independently of the client
+        # capabilities object, so later modifications to that object cannot
+        # affect the session.
+        self._position_encoding = position_encoding
 
         root_path = params.root_path
         root_uri = params.root_uri
@@ -165,8 +189,14 @@ class LanguageServerProtocol(JsonRPCProtocol):
             position_encoding,
         )
 
-        if (user_handler := self.fm.features.get(types.INITIALIZE)) is not None:
-            yield user_handler, (params,), None
+        try:
+            if (user_handler := self.fm.features.get(types.INITIALIZE)) is not None:
+                yield user_handler, (params,), None
+        except Exception:
+            # Initialization failed - do not leave a ready state behind.
+            self._position_encoding = None
+            self._workspace = None
+            raise
 
         # Now that the user has had the opportunity to setup additional features, calculate
         # the server's capabilities
