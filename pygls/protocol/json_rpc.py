@@ -160,6 +160,11 @@ class JsonRPCProtocol:
         self._request_futures: dict[MsgId, Future[Any]] = {}
         self._result_types: dict[MsgId, Any] = {}
 
+        # Ids of requests whose response has been claimed by a cancellation.
+        # Used to decide whether the cancellation or a late handler result
+        # owns the response for a given id, so exactly one response is sent.
+        self._cancelled_requests: set[MsgId] = set()
+
         self.fm = FeatureManager(server, converter)
         self.writer: AsyncWriter | Writer | None = None
         self._include_headers = False
@@ -295,16 +300,22 @@ class JsonRPCProtocol:
         """
         self._request_futures.pop(msg_id, None)
 
+        # Determine who owns the response for this id: if a cancellation
+        # claimed it first, the (late) handler result must not be sent and a
+        # single cancellation response is published instead.
+        cancelled = msg_id in self._cancelled_requests
+        self._cancelled_requests.discard(msg_id)
+
         try:
-            if not future.cancelled():
-                self._send_response(msg_id, result=future.result())
-            else:
+            if cancelled or future.cancelled():
                 self._send_response(
                     msg_id,
                     error=JsonRpcRequestCancelled(
                         f'Request with id "{msg_id}" is canceled'
                     ).to_response_error(),
                 )
+            else:
+                self._send_response(msg_id, result=future.result())
         except JsonRpcException as exc:
             logger.exception('Exception occurred for message "%s"', msg_id)
             self._send_response(msg_id, error=exc.to_response_error())
@@ -343,9 +354,16 @@ class JsonRPCProtocol:
         """Handles a cancel notification from the client."""
         future = self._request_futures.pop(msg_id, None)
 
-        if not future:
+        if future is None:
             logger.warning('Cancel notification for unknown message id "%s"', msg_id)
             return
+
+        # Claim ownership of this id's response: once cancelled, only a single
+        # cancellation response may be published for it (by the future's done
+        # callback), even if the handler is already running and finishes later.
+        # Note: ``0`` is a valid request id, so membership/None checks are used
+        # rather than truthiness.
+        self._cancelled_requests.add(msg_id)
 
         # Will only work if the request hasn't started executing
         if future.cancel():
@@ -429,7 +447,7 @@ class JsonRPCProtocol:
         """Handles a response from the client."""
         future = self._request_futures.pop(msg_id, None)
 
-        if not future:
+        if future is None:
             logger.warning('Received response to unknown message id "%s"', msg_id)
             return
 
