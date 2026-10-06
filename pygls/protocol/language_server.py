@@ -22,7 +22,7 @@ import json
 import logging
 import sys
 import typing
-from functools import lru_cache
+from functools import lru_cache, wraps
 from itertools import zip_longest
 
 from lsprotocol import types
@@ -32,7 +32,7 @@ from pygls.constants import PARAM_LS
 from pygls.exceptions import JsonRpcInvalidParams
 from pygls.protocol.json_rpc import JsonRPCProtocol
 from pygls.uris import from_fs_path
-from pygls.workspace import Workspace
+from pygls.workspace import PositionCodec, Workspace
 
 if typing.TYPE_CHECKING:
     from collections.abc import Generator
@@ -70,6 +70,7 @@ class LanguageServerProtocol(JsonRPCProtocol):
         super().__init__(server, converter)
 
         self._workspace: Optional[Workspace] = None
+        self._position_codec: Optional[PositionCodec] = None
         self.trace = types.TraceValue.Off
 
         from pygls.progress import Progress
@@ -86,7 +87,7 @@ class LanguageServerProtocol(JsonRPCProtocol):
     def _register_builtin_features(self):
         """Registers generic LSP features from this class."""
         for name in dir(self):
-            if name in {"workspace"}:
+            if name in {"workspace", "position_codec"}:
                 continue
 
             attr = getattr(self, name)
@@ -101,6 +102,72 @@ class LanguageServerProtocol(JsonRPCProtocol):
             )
 
         return self._workspace
+
+    @property
+    def position_codec(self) -> PositionCodec:
+        """The position encoding snapshot negotiated for this session.
+
+        The snapshot is taken once the ``initialize`` request has completed
+        successfully and is independent of the capabilities objects exchanged
+        during initialization. Later modifications to those objects therefore
+        do not affect how positions are interpreted for the remainder of the
+        session.
+        """
+        if self._position_codec is None:
+            raise RuntimeError(
+                "The position codec is not available - "
+                "has the server been initialized?"
+            )
+
+        return self._position_codec
+
+    def _discard_session_state(self):
+        """Discard any provisional session state created during ``initialize``.
+
+        Ensures a failed ``initialize`` request does not leave the server in
+        a (partially) ready state.
+        """
+        self._workspace = None
+        self._position_codec = None
+
+    def _guarded_initialize_handler(
+        self, user_handler: Callable[..., Any]
+    ) -> Callable[..., Any]:
+        """Wrap the user's ``initialize`` handler, discarding provisional
+        session state if it fails."""
+
+        if asyncio.iscoroutinefunction(user_handler):
+
+            @wraps(user_handler)
+            async def guarded(*args: Any, **kwargs: Any) -> Any:
+                try:
+                    return await user_handler(*args, **kwargs)
+                except BaseException:
+                    self._discard_session_state()
+                    raise
+
+        elif inspect.isgeneratorfunction(user_handler):
+
+            @wraps(user_handler)
+            def guarded(*args: Any, **kwargs: Any) -> Any:
+                try:
+                    result = yield from user_handler(*args, **kwargs)
+                except BaseException:
+                    self._discard_session_state()
+                    raise
+                return result
+
+        else:
+
+            @wraps(user_handler)
+            def guarded(*args: Any, **kwargs: Any) -> Any:
+                try:
+                    return user_handler(*args, **kwargs)
+                except BaseException:
+                    self._discard_session_state()
+                    raise
+
+        return guarded
 
     @lru_cache()
     def get_message_type(self, method: str) -> Type[Any] | None:
@@ -151,38 +218,55 @@ class LanguageServerProtocol(JsonRPCProtocol):
             self.client_capabilities
         )
 
+        # Take a snapshot of the negotiated position encoding for this session.
+        # The snapshot is independent of the capabilities objects exchanged
+        # during initialization, so later modifications to those objects cannot
+        # affect how positions are interpreted for the rest of the session.
+        session_codec = PositionCodec(encoding=position_encoding)
+
         root_path = params.root_path
         root_uri = params.root_uri
         if root_path is not None and root_uri is None:
             root_uri = from_fs_path(root_path)
 
-        # Initialize the workspace before yielding to the user's initialize handler
+        # Provisionally initialize the workspace before yielding to the user's
+        # initialize handler. Should initialization fail, this state is
+        # discarded again (see `_discard_session_state`).
         workspace_folders = params.workspace_folders or []
         self._workspace = Workspace(
             root_uri,
             text_document_sync_kind,
             workspace_folders,
-            position_encoding,
+            position_codec=session_codec,
         )
 
         if (user_handler := self.fm.features.get(types.INITIALIZE)) is not None:
-            yield user_handler, (params,), None
+            yield self._guarded_initialize_handler(user_handler), (params,), None
 
         # Now that the user has had the opportunity to setup additional features, calculate
         # the server's capabilities
-        self.server_capabilities = ServerCapabilitiesBuilder(
-            self.client_capabilities,
-            set({**self.fm.features, **self.fm.builtin_features}.keys()),
-            self.fm.feature_options,
-            list(self.fm.commands.keys()),
-            text_document_sync_kind,
-            notebook_document_sync,
-            position_encoding,
-        ).build()
+        try:
+            server_capabilities = ServerCapabilitiesBuilder(
+                self.client_capabilities,
+                set({**self.fm.features, **self.fm.builtin_features}.keys()),
+                self.fm.feature_options,
+                list(self.fm.commands.keys()),
+                text_document_sync_kind,
+                notebook_document_sync,
+                position_encoding,
+            ).build()
+        except BaseException:
+            self._discard_session_state()
+            raise
+
         logger.debug(
             "Server capabilities: %s",
-            json.dumps(self.server_capabilities, default=self._serialize_message),
+            json.dumps(server_capabilities, default=self._serialize_message),
         )
+
+        # Initialization succeeded, commit the session state.
+        self.server_capabilities = server_capabilities
+        self._position_codec = session_codec
 
         return types.InitializeResult(
             capabilities=self.server_capabilities,

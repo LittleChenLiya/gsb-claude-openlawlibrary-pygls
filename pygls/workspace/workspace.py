@@ -44,6 +44,7 @@ class Workspace(object):
         position_encoding: Optional[
             Union[PositionEncodingKind, str]
         ] = PositionEncodingKind.Utf16,
+        position_codec: Optional[PositionCodec] = None,
     ):
         self._root_uri = root_uri
         if self._root_uri is not None:
@@ -59,8 +60,13 @@ class Workspace(object):
         self._cell_in_notebook: Dict[str, str] = {}
         self._folders: Dict[str, WorkspaceFolder] = {}
         self._docs: Dict[str, TextDocument] = {}
-        self._position_encoding = position_encoding
-        self._position_codec = PositionCodec(encoding=position_encoding)
+
+        # The codec used to translate positions for this session, defaults to
+        # one derived from ``position_encoding``.
+        if position_codec is None:
+            position_codec = PositionCodec(encoding=position_encoding)
+        self._position_codec = position_codec
+        self._position_encoding = position_codec.encoding
 
         if workspace_folders is not None:
             for folder in workspace_folders:
