@@ -159,6 +159,10 @@ class JsonRPCProtocol:
         )
         self._request_futures: dict[MsgId, Future[Any]] = {}
         self._result_types: dict[MsgId, Any] = {}
+        # Ids of in-flight requests that received a ``$/cancelRequest``.
+        # Used to ensure a cancel response is published exactly once and a
+        # late result is never sent.
+        self._cancelled_requests: set[MsgId] = set()
 
         self.fm = FeatureManager(server, converter)
         self.writer: AsyncWriter | Writer | None = None
@@ -295,6 +299,13 @@ class JsonRPCProtocol:
         """
         self._request_futures.pop(msg_id, None)
 
+        # The client cancelled the request before its result was published.
+        # A cancel response has already been sent, so neither the late result
+        # nor a duplicate cancel response may be published.
+        if msg_id in self._cancelled_requests:
+            self._cancelled_requests.discard(msg_id)
+            return
+
         try:
             if not future.cancelled():
                 self._send_response(msg_id, result=future.result())
@@ -347,9 +358,20 @@ class JsonRPCProtocol:
             logger.warning('Cancel notification for unknown message id "%s"', msg_id)
             return
 
+        # Record the cancellation so that a late result is never published.
+        self._cancelled_requests.add(msg_id)
+
         # Will only work if the request hasn't started executing
         if future.cancel():
             logger.info('Cancelled request with id "%s"', msg_id)
+
+        # Publish the cancel response exactly once.
+        self._send_response(
+            msg_id,
+            error=JsonRpcRequestCancelled(
+                f'Request with id "{msg_id}" is canceled'
+            ).to_response_error(),
+        )
 
     def _handle_notification(self, method_name: str, params: Any):
         """Handles a notification from the client."""
