@@ -130,6 +130,48 @@ class FeatureManager:
         self._builtin_features[feature_name] = func
         logger.info("Registered builtin feature %s", feature_name)
 
+    def _check_feature_not_registered(
+        self, feature_name: str, allow_override: Optional[bool]
+    ) -> None:
+        """Check that ``feature_name`` is not already registered, before any
+        registration state is mutated.
+
+        The same conflict rule applies to handlers registered under builtin
+        protocol methods and handlers registered under user defined methods.
+
+        Parameters
+        ----------
+        feature_name
+           Name of the feature about to be registered
+
+        allow_override
+           Controls how an already registered handler is treated:
+
+           - ``None`` (default): preserves the historical behaviour, user
+             features may augment a builtin protocol method and only an
+             existing user feature is considered a conflict.
+           - ``False``: any existing handler - user or builtin - is a
+             conflict, ``FeatureAlreadyRegisteredError`` is raised and the
+             existing handler is left untouched.
+           - ``True``: any existing handler may be replaced.
+        """
+        existing = self._features.get(feature_name)
+
+        # With the default policy, re-registering a method that only has a
+        # builtin handler is fine: the user handler augments the builtin one.
+        if allow_override is None:
+            if existing is not None:
+                logger.error('Feature "%s" is already registered.', feature_name)
+                raise FeatureAlreadyRegisteredError(feature_name)
+            return
+
+        if allow_override:
+            return
+
+        if existing is not None or feature_name in self._builtin_features:
+            logger.error('Feature "%s" is already registered.', feature_name)
+            raise FeatureAlreadyRegisteredError(feature_name)
+
     @property
     def builtin_features(self) -> Dict:
         """Returns server builtin features."""
@@ -176,11 +218,36 @@ class FeatureManager:
         self,
         feature_name: str,
         options: Optional[Any] = None,
+        allow_override: Optional[bool] = None,
     ) -> Callable[[F], F]:
         """Decorator used to register LSP features.
 
         Example:
             @ls.feature('textDocument/completion', CompletionItems(trigger_characters=['.']))
+
+        Parameters
+        ----------
+        feature_name
+           Name of the LSP method to register a handler for
+
+        options
+           Options associated with the feature
+
+        allow_override
+           Policy to apply when a handler is already registered for
+           ``feature_name``. Builtin protocol methods and user defined methods
+           follow the same conflict rule:
+
+           - ``None`` (default): keeps the historical behaviour, registering a
+             user handler for a builtin protocol method is allowed (the two
+             cooperate) while registering two user handlers for the same
+             method raises ``FeatureAlreadyRegisteredError``.
+           - ``False``: refuse duplicate registrations; raises
+             ``FeatureAlreadyRegisteredError`` whenever a handler - builtin or
+             user defined - already exists. The registry is not modified, so
+             the previous handler keeps being used.
+           - ``True``: allow the new handler to replace an existing user
+             handler.
         """
 
         def decorator(f: F) -> F:
@@ -189,10 +256,9 @@ class FeatureManager:
                 logger.error("Missing feature name.")
                 raise ValidationError("Feature name is required.")
 
-            # Add feature if not exists
-            if feature_name in self._features:
-                logger.error('Feature "%s" is already registered.', feature_name)
-                raise FeatureAlreadyRegisteredError(feature_name)
+            # Check for an existing handler before touching the registry, so
+            # that a rejected registration leaves the previous handler intact.
+            self._check_feature_not_registered(feature_name, allow_override)
 
             assign_help_attrs(f, feature_name, ATTR_FEATURE_TYPE)
 

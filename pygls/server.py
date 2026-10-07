@@ -261,6 +261,7 @@ class JsonRPCServer:
         self,
         feature_name: str,
         options: Any | None = None,
+        allow_override: bool | None = None,
     ) -> Callable[[F], F]:
         """Decorator used to register LSP features.
 
@@ -271,8 +272,11 @@ class JsonRPCServer:
            @ls.feature('textDocument/completion', CompletionOptions(trigger_characters=['.']))
            def completions(ls, params: CompletionParams):
                return CompletionList(is_incomplete=False, items=[CompletionItem("Completion 1")])
+
+        Set ``allow_override=False`` to reject the registration when a handler
+        (builtin or user defined) is already registered for the method.
         """
-        return self.protocol.fm.feature(feature_name, options)
+        return self.protocol.fm.feature(feature_name, options, allow_override)
 
     @property
     def thread_pool(self) -> ThreadPoolExecutor:

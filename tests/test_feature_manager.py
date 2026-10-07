@@ -175,6 +175,36 @@ def test_register_same_feature_twice_error(feature_manager):
             pass
 
 
+def test_register_feature_duplicate_protection(feature_manager):
+    """Short regression for ``allow_override``: a rejected registration must
+    never replace the previously registered handler."""
+
+    @feature_manager.feature(lsp.TEXT_DOCUMENT_CODE_ACTION)
+    def code_action1():
+        return "old"
+
+    # User defined methods and builtin protocol methods share the rule.
+    with pytest.raises(FeatureAlreadyRegisteredError):
+
+        @feature_manager.feature(lsp.TEXT_DOCUMENT_CODE_ACTION, allow_override=False)
+        def code_action2():  # pylint: disable=unused-variable
+            return "new"
+
+    # The old handler is still the one registered and callable.
+    assert feature_manager.features[lsp.TEXT_DOCUMENT_CODE_ACTION] is code_action1
+    assert feature_manager.features[lsp.TEXT_DOCUMENT_CODE_ACTION]() == "old"
+
+    # Builtin methods are protected by the same strict rule.
+    feature_manager.add_builtin_feature(lsp.SHUTDOWN, lambda: "builtin")
+    with pytest.raises(FeatureAlreadyRegisteredError):
+
+        @feature_manager.feature(lsp.SHUTDOWN, allow_override=False)
+        def shutdown():  # pylint: disable=unused-variable
+            return "user"
+
+    assert lsp.SHUTDOWN not in feature_manager.features
+
+
 def test_wrap_with_server_async():
     class Server:
         pass

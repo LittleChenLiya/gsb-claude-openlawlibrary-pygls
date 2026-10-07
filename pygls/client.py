@@ -67,6 +67,7 @@ class JsonRPCClient:
         self,
         feature_name: str,
         options: Optional[Any] = None,
+        allow_override: Optional[bool] = None,
     ) -> Callable[[F], F]:
         """Decorator used to register LSP features.
 
@@ -82,8 +83,11 @@ class JsonRPCClient:
            @ls.feature('window/logMessage')
            def completions(ls, params):
                logging.info("%s", params.message)
+
+        Set ``allow_override=False`` to reject the registration when a handler
+        (builtin or user defined) is already registered for the method.
         """
-        return self.protocol.fm.feature(feature_name, options)
+        return self.protocol.fm.feature(feature_name, options, allow_override)
 
     async def start_io(self, cmd: str, *args, **kwargs):
         """Start the given server and communicate with it over stdio."""
