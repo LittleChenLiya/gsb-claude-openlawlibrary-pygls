@@ -67,6 +67,10 @@ logger = logging.getLogger(__name__)
 # TYPE_CHECKING block above
 MsgId = Union[str, int]
 
+# Signature of the optional observer for notifications addressed to
+# unregistered methods; it is called with ``(method_name, params)``.
+UnknownNotificationCallback = Callable[[str, Any], Any]
+
 
 @runtime_checkable
 class RPCNotification(Protocol):
@@ -147,7 +151,12 @@ class JsonRPCProtocol:
     CONTENT_TYPE = "application/vscode-jsonrpc"
     VERSION = "2.0"
 
-    def __init__(self, server: JsonRPCServer, converter: Converter):
+    def __init__(
+        self,
+        server: JsonRPCServer,
+        converter: Converter,
+        unknown_notification_callback: UnknownNotificationCallback | None = None,
+    ):
         self._server = server
         self._converter = converter
 
@@ -163,6 +172,36 @@ class JsonRPCProtocol:
         self.fm = FeatureManager(server, converter)
         self.writer: AsyncWriter | Writer | None = None
         self._include_headers = False
+
+        # Optional observer for notifications whose method is not registered.
+        # Notifications never produce a response, so this is the only hook
+        # available for such messages.
+        self._unknown_notification_callback: UnknownNotificationCallback | None = (
+            unknown_notification_callback
+        )
+
+    def set_unknown_notification_callback(
+        self,
+        callback: UnknownNotificationCallback | None,
+    ) -> None:
+        """Register (or clear) an observer for unknown notifications.
+
+        Parameters
+        ----------
+        callback
+           A callable invoked as ``callback(method_name, params)`` whenever a
+           notification is received for a method with no registered handler.
+
+           The original ``params`` from the message are passed through
+           unmodified. Notifications cannot produce responses, so any value
+           returned by the callback is ignored; exceptions raised by the
+           callback are logged and do not interrupt the processing of
+           subsequent frames.
+
+           Pass ``None`` to remove a previously registered observer and
+           restore the default behavior (log and ignore).
+        """
+        self._unknown_notification_callback = callback
 
     def __call__(self):
         return self
@@ -351,6 +390,29 @@ class JsonRPCProtocol:
         if future.cancel():
             logger.info('Cancelled request with id "%s"', msg_id)
 
+    def _notify_unknown_notification_observer(
+        self, method_name: str, params: Any
+    ) -> None:
+        """Notify the registered observer (if any) of an unknown notification.
+
+        The observer is purely observational: its return value is ignored and
+        any exception it raises is logged. Notifications must never produce a
+        response and observer failures must not break processing of later
+        frames.
+        """
+        callback = self._unknown_notification_callback
+        if callback is None:
+            logger.warning("Ignoring notification for unknown method %r", method_name)
+            return
+
+        try:
+            callback(method_name, params)
+        except Exception:
+            logger.exception(
+                "Unknown notification observer raised an exception for method %r",
+                method_name,
+            )
+
     def _handle_notification(self, method_name: str, params: Any):
         """Handles a notification from the client."""
         if method_name == CANCEL_REQUEST:
@@ -366,7 +428,7 @@ class JsonRPCProtocol:
                 callback=self._check_handler_result,
             )
         except JsonRpcMethodNotFound:
-            logger.warning("Ignoring notification for unknown method %r", method_name)
+            self._notify_unknown_notification_observer(method_name, params)
         except Exception as error:
             logger.exception(
                 "Failed to handle notification %r: %s",
@@ -481,7 +543,22 @@ class JsonRPCProtocol:
 
             else:
                 method = data.get("method", "")
-                notification_type = self.get_message_type(method) or JsonRPCNotification
+                notification_type = self.get_message_type(method)
+                if (
+                    notification_type is None
+                    and self._unknown_notification_callback is not None
+                ):
+                    # An unknown-notification observer is registered: there is
+                    # no message type to structure ``params`` into, so keep the
+                    # original payload untouched and hand the observer exactly
+                    # what the client sent. When no observer is registered the
+                    # historical (namedtuple-based) behavior is preserved.
+                    return JsonRPCNotification(
+                        method=method,
+                        jsonrpc=data["jsonrpc"],
+                        params=data.get("params"),
+                    )
+                notification_type = notification_type or JsonRPCNotification
                 return self._converter.structure(data, notification_type)
 
         except ClassValidationError as exc:

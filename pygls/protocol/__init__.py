@@ -9,6 +9,7 @@ from pygls.protocol.json_rpc import (
     JsonRPCProtocol,
     JsonRPCRequestMessage,
     JsonRPCResponseMessage,
+    UnknownNotificationCallback,
 )
 from pygls.protocol.language_server import LanguageServerProtocol, lsp_method
 
@@ -66,6 +67,7 @@ __all__ = (
     "JsonRPCRequestMessage",
     "JsonRPCResponseMessage",
     "JsonRPCNotification",
+    "UnknownNotificationCallback",
     "_dict_to_object",
     "_params_field_structure_hook",
     "_result_field_structure_hook",

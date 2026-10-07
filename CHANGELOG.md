@@ -2,6 +2,20 @@
 All notable changes to this project will be documented in this file.
 
 
+## [Unreleased]
+
+### Features
+
+- Add an optional observer for unknown JSON-RPC notifications. Pass
+  `unknown_notification_callback` when constructing a `JsonRPCProtocol`
+  (or call `set_unknown_notification_callback()`) to receive
+  `(method_name, params)` for notifications addressed to unregistered methods.
+  Notifications still never produce responses, unknown requests still follow
+  the existing method-not-found error flow and exceptions raised by the
+  observer are logged without interrupting later frames. When the option is not
+  enabled the original behavior is unchanged.
+
+
 ## [2.1.1] - 2026-03-25
 More details: https://github.com/openlawlibrary/pygls/releases/tag/v2.1.1
 
