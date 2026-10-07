@@ -60,6 +60,7 @@ if typing.TYPE_CHECKING:
 
     MessageHandler = Union[Callable[[Any], Any],]
     MessageCallback = Callable[[Future[Any]], None]
+    NotificationObserver = Callable[[str, Any], None]
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +148,18 @@ class JsonRPCProtocol:
     CONTENT_TYPE = "application/vscode-jsonrpc"
     VERSION = "2.0"
 
-    def __init__(self, server: JsonRPCServer, converter: Converter):
+    def __init__(
+        self,
+        server: JsonRPCServer,
+        converter: Converter,
+        notification_observer: NotificationObserver | None = None,
+    ):
         self._server = server
         self._converter = converter
+
+        # Optional observer invoked with (method_name, raw params) whenever a
+        # notification arrives for a method that has no registered handler.
+        self._notification_observer = notification_observer
 
         self._shutdown = False
 
@@ -367,6 +377,7 @@ class JsonRPCProtocol:
             )
         except JsonRpcMethodNotFound:
             logger.warning("Ignoring notification for unknown method %r", method_name)
+            self._notify_unknown_notification(method_name, params)
         except Exception as error:
             logger.exception(
                 "Failed to handle notification %r: %s",
@@ -375,6 +386,25 @@ class JsonRPCProtocol:
                 exc_info=True,
             )
             self._server._report_server_error(error, FeatureNotificationError)
+
+    def _notify_unknown_notification(self, method_name: str, params: Any):
+        """Invoke the user supplied observer for an unknown notification.
+
+        Notifications never produce a response, so this is purely an
+        observation hook. Any exception raised by the observer is logged and
+        swallowed so that subsequent messages are still processed.
+        """
+        if self._notification_observer is None:
+            return
+
+        try:
+            self._notification_observer(method_name, params)
+        except Exception:
+            logger.exception(
+                "Unknown notification observer failed for method %r",
+                method_name,
+                exc_info=True,
+            )
 
     def _handle_request(self, msg_id: MsgId, method_name: str, params: Any):
         """Handles a request from the client."""
