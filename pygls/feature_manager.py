@@ -115,13 +115,20 @@ class FeatureManager:
                                 features/commands with first parameter:
                                     1. ls - parameter naming convention
                                     2. name: LanguageServer - add typings
+        reject_duplicates(bool): When true, dynamically registered features
+                                 are rejected if *any* handler (builtin or
+                                 user defined) already exists for the method
+                                 name. Defaults to false, preserving the
+                                 historical behaviour where user features may
+                                 reuse builtin method names.
     """
 
-    def __init__(self, server=None, converter=None):
+    def __init__(self, server=None, converter=None, reject_duplicates: bool = False):
         self._builtin_features = {}
         self._feature_options = {}
         self._features = {}
         self._commands = {}
+        self._reject_duplicates = reject_duplicates
         self.server = server
         self.converter = converter
 
@@ -176,11 +183,21 @@ class FeatureManager:
         self,
         feature_name: str,
         options: Optional[Any] = None,
+        *,
+        reject_duplicates: Optional[bool] = None,
     ) -> Callable[[F], F]:
         """Decorator used to register LSP features.
 
         Example:
             @ls.feature('textDocument/completion', CompletionItems(trigger_characters=['.']))
+
+        When ``reject_duplicates`` is true, registration is refused (with
+        :class:`~pygls.exceptions.FeatureAlreadyRegisteredError`) if a handler
+        - builtin or user defined - already exists for ``feature_name``. The
+        check happens before the registry is modified, so a rejected
+        registration leaves the existing handler in place. When omitted, the
+        manager-level ``reject_duplicates`` mode is used; both default to
+        false, preserving the historical behaviour.
         """
 
         def decorator(f: F) -> F:
@@ -192,6 +209,17 @@ class FeatureManager:
             # Add feature if not exists
             if feature_name in self._features:
                 logger.error('Feature "%s" is already registered.', feature_name)
+                raise FeatureAlreadyRegisteredError(feature_name)
+
+            # Reject-duplicate mode: builtin protocol methods and user methods
+            # share the same conflict rule.
+            reject = (
+                self._reject_duplicates if reject_duplicates is None else reject_duplicates
+            )
+            if reject and feature_name in self._builtin_features:
+                logger.error(
+                    'Feature "%s" clashes with a builtin feature.', feature_name
+                )
                 raise FeatureAlreadyRegisteredError(feature_name)
 
             assign_help_attrs(f, feature_name, ATTR_FEATURE_TYPE)

@@ -261,6 +261,8 @@ class JsonRPCServer:
         self,
         feature_name: str,
         options: Any | None = None,
+        *,
+        reject_duplicates: bool | None = None,
     ) -> Callable[[F], F]:
         """Decorator used to register LSP features.
 
@@ -271,8 +273,14 @@ class JsonRPCServer:
            @ls.feature('textDocument/completion', CompletionOptions(trigger_characters=['.']))
            def completions(ls, params: CompletionParams):
                return CompletionList(is_incomplete=False, items=[CompletionItem("Completion 1")])
+
+        Set ``reject_duplicates=True`` to refuse registration when a handler
+        (builtin or user defined) already exists for ``feature_name``; the
+        existing handler is left untouched.
         """
-        return self.protocol.fm.feature(feature_name, options)
+        return self.protocol.fm.feature(
+            feature_name, options, reject_duplicates=reject_duplicates
+        )
 
     @property
     def thread_pool(self) -> ThreadPoolExecutor:

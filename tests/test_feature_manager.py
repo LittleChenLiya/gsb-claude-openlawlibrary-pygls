@@ -18,7 +18,7 @@ import asyncio
 from typing import Any
 
 import pytest
-from lsprotocol import types as lsp
+from lsprotocol import converters, types as lsp
 
 from pygls.capabilities import ServerCapabilitiesBuilder
 from pygls.exceptions import (
@@ -173,6 +173,96 @@ def test_register_same_feature_twice_error(feature_manager):
         @feature_manager.feature(lsp.TEXT_DOCUMENT_CODE_ACTION)
         def code_action2():  # pylint: disable=unused-variable
             pass
+
+
+def test_reject_duplicates_builtin_conflict(feature_manager):
+    """Reject-duplicate mode: builtin protocol methods and user methods share
+    the same conflict rule, and a rejected registration leaves the existing
+    (builtin) handler executable."""
+    calls = []
+
+    def builtin_handler(*args):
+        calls.append(args)
+        return "builtin-result"
+
+    feature_manager.add_builtin_feature(lsp.TEXT_DOCUMENT_DID_OPEN, builtin_handler)
+
+    with pytest.raises(FeatureAlreadyRegisteredError):
+
+        @feature_manager.feature(lsp.TEXT_DOCUMENT_DID_OPEN, reject_duplicates=True)
+        def did_open():  # pylint: disable=unused-variable
+            return "user-result"
+
+    # The failed registration must not have touched the registry...
+    assert lsp.TEXT_DOCUMENT_DID_OPEN not in feature_manager.features
+
+    # ...and the old handler still executes.
+    handler = feature_manager.builtin_features[lsp.TEXT_DOCUMENT_DID_OPEN]
+    assert handler is builtin_handler
+    assert handler() == "builtin-result"
+    assert calls == [tuple()]
+
+
+def test_reject_duplicates_user_conflict(feature_manager):
+    """Reject-duplicate mode: a conflicting user method is also rejected and
+    the original handler keeps working."""
+
+    @feature_manager.feature(lsp.TEXT_DOCUMENT_COMPLETION)
+    def completions():
+        return "original"
+
+    with pytest.raises(FeatureAlreadyRegisteredError):
+
+        @feature_manager.feature(lsp.TEXT_DOCUMENT_COMPLETION, reject_duplicates=True)
+        def completions2():  # pylint: disable=unused-variable
+            return "replacement"
+
+    handler = feature_manager.features[lsp.TEXT_DOCUMENT_COMPLETION]
+    assert handler is completions
+    assert handler() == "original"
+
+
+def test_reject_duplicates_manager_level():
+    """The mode can also be enabled for the whole feature manager."""
+    fm = FeatureManager(None, converters.get_converter(), reject_duplicates=True)
+    fm.add_builtin_feature(lsp.SHUTDOWN, lambda: "builtin")
+
+    with pytest.raises(FeatureAlreadyRegisteredError):
+
+        @fm.feature(lsp.SHUTDOWN)
+        def shutdown():  # pylint: disable=unused-variable
+            pass
+
+    assert lsp.SHUTDOWN not in fm.features
+    assert fm.builtin_features[lsp.SHUTDOWN]() == "builtin"
+
+
+def test_reject_duplicates_with_language_server():
+    """End-to-end via the public ``LanguageServer.feature`` interface."""
+    server = LanguageServer("reject-duplicates", "1.0")
+    builtin = server.protocol.fm.builtin_features[lsp.SHUTDOWN]
+
+    with pytest.raises(FeatureAlreadyRegisteredError):
+
+        @server.feature(lsp.SHUTDOWN, reject_duplicates=True)
+        def shutdown():  # pylint: disable=unused-variable
+            pass
+
+    assert lsp.SHUTDOWN not in server.protocol.fm.features
+    assert server.protocol.fm.builtin_features[lsp.SHUTDOWN] is builtin
+
+
+def test_register_feature_default_allows_builtin_method_name(feature_manager):
+    """Regression: the original interface is unchanged - by default a user
+    feature may reuse a builtin method name."""
+    feature_manager.add_builtin_feature(lsp.TEXT_DOCUMENT_DID_OPEN, lambda: "builtin")
+
+    @feature_manager.feature(lsp.TEXT_DOCUMENT_DID_OPEN)
+    def did_open():
+        return "user"
+
+    assert feature_manager.features[lsp.TEXT_DOCUMENT_DID_OPEN] is did_open
+    assert feature_manager.features[lsp.TEXT_DOCUMENT_DID_OPEN]() == "user"
 
 
 def test_wrap_with_server_async():
